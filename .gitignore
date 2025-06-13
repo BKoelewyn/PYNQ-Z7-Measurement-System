@@ -1,0 +1,128 @@
+# Python files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyCharm IDE
+.idea/
+*.swp
+*.swo
+
+# VS Code
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Windows
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# FPGA/Vivado files
+*.jou
+*.log
+*.str
+*.debug
+*.ltx
+*cache/
+*.runs/
+*.sim/
+*.ip_user_files/
+*.hw/
+*.gen/
+*.sdk/
+*.hdf
+vivado*.backup.log
+vivado_pid*.str
+hs_err_pid*.log
+.Xil/
+
+# ModelSim/Simulation files
+work/
+transcript
+*.wlf
+*.vstf
+*.wlft
+modelsim.ini
+
+# Large data files
+*.bin
+*.dat
+*.raw
+*.dump
+
+# Temporary measurement data (keep structure, ignore data)
+data/measurements/*.csv
+data/performance_logs/*.log
+!data/measurements/.gitkeep
+!data/performance_logs/.gitkeep
+
+# Temporary image captures (keep samples folder, ignore captures)
+images/samples/camera_*.jpg
+images/samples/test_*.jpg
+images/results/*.jpg
+images/results/*.png
+!images/samples/.gitkeep
+!images/results/.gitkeep
+
+# Configuration files with sensitive data
+config/local_*.py
+config/*_local.yaml
+
+# Backup files
+*.bak
+*.backup
+*.old
+*~
+
+# Log files
+*.log

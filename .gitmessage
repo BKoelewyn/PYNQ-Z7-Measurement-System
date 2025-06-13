@@ -1,0 +1,20 @@
+# Title: Brief description (50 chars max)
+#
+# Body: Detailed explanation (wrap at 72 chars)
+#
+# Format:
+# type: description
+#
+# Types:
+# feat: New feature
+# fix: Bug fix
+# docs: Documentation
+# style: Code formatting
+# refactor: Code restructuring
+# test: Adding tests
+# chore: Maintenance
+#
+# Footer:
+# Week: [1-5]
+# Component: [hardware/software/docs/tests]
+# Testing: [tested/not-tested/n/a]
