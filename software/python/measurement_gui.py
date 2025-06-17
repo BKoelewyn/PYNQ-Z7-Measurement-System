@@ -1,6 +1,6 @@
 """
-PYNQ Z7 Precision Object Measurement System - GUI Framework
-Main user interface for real-time measurement system
+PYNQ Z7 Precision Object Measurement System - Complete GUI Framework
+Integrated with existing settings and camera configuration
 """
 
 import tkinter as tk
@@ -26,14 +26,41 @@ sys.path.append(str(project_root))
 
 try:
     from config.settings import *
+    # Check if REFERENCE_OBJECTS exists in settings, if not create it
+    if 'REFERENCE_OBJECTS' not in globals():
+        REFERENCE_OBJECTS = {
+            "1 Shekel": 18.0,   # Israeli 1 shekel coin diameter
+            "2 Shekel": 21.6,   # Israeli 2 shekel coin diameter
+            "5 Shekel": 24.0,   # Israeli 5 shekel coin diameter
+            "10 Shekel": 26.0,  # Israeli 10 shekel coin diameter
+            "Ruler (10cm)": 100.0,  # 10cm ruler segment
+            "Ruler (15cm)": 150.0,  # 15cm ruler
+            "Credit Card": 85.6     # Credit card width
+        }
+        log_with_timestamp("REFERENCE_OBJECTS added with Israeli coins")
+    else:
+        log_with_timestamp(f"REFERENCE_OBJECTS loaded from settings: {list(REFERENCE_OBJECTS.keys())}")
 except ImportError as e:
     log_with_timestamp(f"Config import error: {e}")
     # Fallback default values
     CAMERA_ID = 1
     CAMERA_WIDTH = 640
     CAMERA_HEIGHT = 480
-    EDGE_DETECTION_LOW = 40
-    EDGE_DETECTION_HIGH = 120
+    EDGE_DETECTION_LOW = 50
+    EDGE_DETECTION_HIGH = 150
+    REFERENCE_OBJECTS = {
+        "1 Shekel": 18.0,
+        "2 Shekel": 21.6,
+        "5 Shekel": 24.0,
+        "10 Shekel": 26.0,
+        "Ruler (10cm)": 100.0,
+        "Ruler (15cm)": 150.0,
+        "Credit Card": 85.6
+    }
+    log_with_timestamp("Using fallback configuration with Israeli coins")
+
+# Log what reference objects we have available
+log_with_timestamp(f"Available reference objects: {list(REFERENCE_OBJECTS.keys())}")
 
 # Import camera interface with correct class name
 CAMERA_AVAILABLE = False
@@ -47,7 +74,7 @@ except ImportError as e:
 
 # Placeholder classes for missing modules
 class ImageProcessor:
-    """Placeholder image processor until real module is created"""
+    """Basic image processor using OpenCV"""
     def __init__(self):
         pass
 
@@ -63,9 +90,410 @@ class ImageProcessor:
         return cv2.GaussianBlur(frame, (5, 5), 0)
 
 class MeasurementCalculator:
-    """Placeholder measurement calculator until real module is created"""
+    """Basic measurement calculator"""
     def __init__(self):
         pass
+
+class ObjectDetector:
+    """Enhanced object detector for calibration objects including rulers"""
+    def __init__(self):
+        self.detection_enabled = False
+
+    def detect_coins(self, frame):
+        """Detect circular coins using HoughCircles with stricter parameters"""
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Apply stronger blur to reduce noise
+            blurred = cv2.GaussianBlur(gray, (15, 15), 2)
+
+            # Use stricter parameters for HoughCircles
+            circles = cv2.HoughCircles(
+                blurred,
+                cv2.HOUGH_GRADIENT,
+                dp=1,                # Resolution ratio
+                minDist=80,          # Minimum distance between circles (was 50)
+                param1=80,           # Upper threshold for edge detection (was 50)
+                param2=40,           # Accumulator threshold (was 30) - higher = fewer detections
+                minRadius=25,        # Minimum radius (was 20)
+                maxRadius=80         # Maximum radius (was 100)
+            )
+
+            detected_coins = []
+            if circles is not None:
+                circles = np.round(circles[0, :]).astype("int")
+
+                for (x, y, r) in circles:
+                    # Additional validation: check circularity by analyzing the actual contour
+                    circularity_score = self._validate_coin_circularity(gray, x, y, r)
+
+                    if circularity_score > 0.7:  # Only accept very circular objects
+                        detected_coins.append({
+                            'type': 'coin',
+                            'center': (x, y),
+                            'radius': r,
+                            'diameter_pixels': r * 2,
+                            'confidence': circularity_score
+                        })
+
+            # Sort by confidence and return only top 2
+            detected_coins.sort(key=lambda x: x['confidence'], reverse=True)
+            return detected_coins[:2]  # Limit to 2 best detections
+
+        except Exception as e:
+            log_with_timestamp(f"Coin detection error: {e}")
+            return []
+
+    def _validate_coin_circularity(self, gray, cx, cy, radius):
+        """Validate that a detected circle is actually circular"""
+        try:
+            # Create a mask for the circle
+            mask = np.zeros(gray.shape, dtype=np.uint8)
+            cv2.circle(mask, (cx, cy), radius, 255, -1)
+
+            # Apply threshold to get binary image
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # Find contours in the masked region
+            masked = cv2.bitwise_and(thresh, mask)
+            contours, _ = cv2.findContours(masked, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if contours:
+                # Get the largest contour
+                largest_contour = max(contours, key=cv2.contourArea)
+
+                # Calculate circularity
+                area = cv2.contourArea(largest_contour)
+                perimeter = cv2.arcLength(largest_contour, True)
+
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    return min(1.0, circularity)
+
+            return 0.5  # Default medium confidence
+
+        except:
+            return 0.5
+
+    def detect_rulers(self, frame):
+        """Enhanced ruler detection with stricter parameters"""
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Try only the most reliable method first
+            rulers_contours = self._detect_rulers_contours(gray)
+
+            # If no good detections, try edge method
+            if not rulers_contours or max(r['confidence'] for r in rulers_contours) < 0.6:
+                rulers_edges = self._detect_rulers_edges(gray)
+                rulers_contours.extend(rulers_edges)
+
+            # Remove duplicates and sort by confidence
+            unique_rulers = self._remove_duplicate_rulers(rulers_contours)
+            unique_rulers.sort(key=lambda x: x['confidence'], reverse=True)
+
+            # Only return high-confidence detections
+            good_rulers = [r for r in unique_rulers if r['confidence'] > 0.5]
+
+            return good_rulers[:2]  # Return max 2 detections
+
+        except Exception as e:
+            log_with_timestamp(f"Ruler detection error: {e}")
+            return []
+
+    def _detect_rulers_edges(self, gray):
+        """Detect rulers using edge detection"""
+        # Apply adaptive threshold for better edge detection
+        adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+        # Apply edge detection
+        edges = cv2.Canny(adaptive_thresh, 30, 100, apertureSize=3)
+
+        # Dilate to connect broken edges
+        kernel = np.ones((2,2), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        return self._analyze_contours_for_rulers(edges, "edges")
+
+    def _detect_rulers_contours(self, gray):
+        """Detect rulers using contour analysis"""
+        # Apply bilateral filter to reduce noise while keeping edges sharp
+        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+
+        # Apply threshold
+        _, thresh = cv2.threshold(filtered, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Morphological operations
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        return self._analyze_contours_for_rulers(thresh, "contours")
+
+    def detect_cards(self, frame):
+        """Specific detection for credit card-sized rectangular objects"""
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Apply bilateral filter to reduce noise while keeping edges sharp
+            filtered = cv2.bilateralFilter(gray, 11, 80, 80)
+
+            # Apply adaptive threshold for better edge detection
+            adaptive_thresh = cv2.adaptiveThreshold(filtered, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+            # Apply edge detection
+            edges = cv2.Canny(adaptive_thresh, 30, 100, apertureSize=3)
+
+            # Morphological operations to connect edges
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            detected_cards = []
+
+            for contour in contours:
+                # Calculate contour area
+                area = cv2.contourArea(contour)
+
+                # Credit card should be reasonably large
+                if area < 8000 or area > 35000:
+                    continue
+
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+
+                # Credit card aspect ratio is approximately 1.586:1 (85.6mm x 53.98mm)
+                aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 0
+
+                # Credit card should have aspect ratio between 1.4 and 1.8
+                if aspect_ratio < 1.4 or aspect_ratio > 1.9:
+                    continue
+
+                # Check rectangularity (credit cards are very rectangular)
+                rect_area = w * h
+                rectangularity = area / rect_area if rect_area > 0 else 0
+
+                if rectangularity < 0.7:  # Should be very rectangular
+                    continue
+
+                # Credit card should have reasonable dimensions
+                length_pixels = max(w, h)
+                width_pixels = min(w, h)
+
+                if length_pixels < 120 or width_pixels < 70:  # Minimum size
+                    continue
+
+                # Calculate confidence based on how well it matches credit card proportions
+                ideal_aspect_ratio = 1.586
+                aspect_score = 1.0 - abs(aspect_ratio - ideal_aspect_ratio) / ideal_aspect_ratio
+                rect_score = rectangularity
+                size_score = min(1.0, area / 20000)
+
+                confidence = (aspect_score + rect_score + size_score) / 3.0
+                confidence = min(0.9, confidence)
+
+                # Only add if confidence is good
+                if confidence > 0.6:
+                    detected_cards.append({
+                        'type': 'card',
+                        'center': (x + w//2, y + h//2),
+                        'length_pixels': length_pixels,
+                        'width_pixels': width_pixels,
+                        'area_pixels': area,
+                        'aspect_ratio': aspect_ratio,
+                        'rectangularity': rectangularity,
+                        'confidence': confidence,
+                        'bounding_rect': (x, y, w, h),
+                        'detection_method': 'card_specific'
+                    })
+
+            # Sort by confidence and return best detection
+            detected_cards.sort(key=lambda x: x['confidence'], reverse=True)
+            return detected_cards[:1]  # Return only the best card detection
+
+        except Exception as e:
+            log_with_timestamp(f"Card detection error: {e}")
+            return []
+
+    def _analyze_contours_for_rulers(self, processed_image, method_name):
+        """Analyze contours to find ruler-like objects with stricter parameters"""
+        # Find contours
+        contours, _ = cv2.findContours(processed_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        rulers = []
+
+        for contour in contours:
+            # Calculate contour area
+            area = cv2.contourArea(contour)
+
+            # Stricter area filtering
+            if area < 5000 or area > 40000:  # Reduced max area
+                continue
+
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+
+            # Calculate aspect ratio
+            aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 0
+
+            # Stricter aspect ratio for rulers
+            if aspect_ratio < 4.0 or aspect_ratio > 12.0:  # More restrictive
+                continue
+
+            # Check rectangularity
+            rect_area = w * h
+            rectangularity = area / rect_area if rect_area > 0 else 0
+
+            # Stricter rectangularity
+            if rectangularity < 0.5:  # More rectangular required
+                continue
+
+            # Additional check: ruler should have minimum length
+            length_pixels = max(w, h)
+            if length_pixels < 100:  # Minimum 100 pixels long
+                continue
+
+            width_pixels = min(w, h)
+
+            # Enhanced confidence calculation with stricter scoring
+            size_score = min(1.0, area / 15000)  # Prefer larger objects
+            aspect_score = min(1.0, aspect_ratio / 6.0)  # Good aspect ratio
+            rect_score = rectangularity
+            length_score = min(1.0, length_pixels / 200)  # Prefer longer objects
+
+            confidence = (size_score + aspect_score + rect_score + length_score) / 4.0
+            confidence = min(0.9, confidence)
+
+            # Only add if confidence is reasonable
+            if confidence > 0.4:
+                rulers.append({
+                    'type': 'ruler',
+                    'center': (x + w//2, y + h//2),
+                    'length_pixels': length_pixels,
+                    'width_pixels': width_pixels,
+                    'area_pixels': area,
+                    'aspect_ratio': aspect_ratio,
+                    'rectangularity': rectangularity,
+                    'confidence': confidence,
+                    'bounding_rect': (x, y, w, h),
+                    'detection_method': method_name
+                })
+
+        return rulers
+
+    def _remove_duplicate_rulers(self, rulers):
+        """Remove duplicate ruler detections that are too close to each other"""
+        if len(rulers) <= 1:
+            return rulers
+
+        unique_rulers = []
+
+        for ruler in rulers:
+            is_duplicate = False
+            for existing in unique_rulers:
+                # Calculate distance between centers
+                dx = ruler['center'][0] - existing['center'][0]
+                dy = ruler['center'][1] - existing['center'][1]
+                distance = np.sqrt(dx*dx + dy*dy)
+
+                # If centers are close and sizes are similar, consider it a duplicate
+                if distance < 50 and abs(ruler['length_pixels'] - existing['length_pixels']) < 30:
+                    is_duplicate = True
+                    # Keep the one with higher confidence
+                    if ruler['confidence'] > existing['confidence']:
+                        unique_rulers.remove(existing)
+                        unique_rulers.append(ruler)
+                    break
+
+            if not is_duplicate:
+                unique_rulers.append(ruler)
+
+        return unique_rulers
+
+    def detect_objects(self, frame):
+        """Detect coins, rulers, and cards in frame"""
+        detected_objects = {}
+
+        # Detect coins
+        coins = self.detect_coins(frame)
+        if coins:
+            detected_objects['coins'] = coins
+
+        # Detect rulers
+        rulers = self.detect_rulers(frame)
+        if rulers:
+            detected_objects['rulers'] = rulers
+
+        # Detect cards specifically
+        cards = self.detect_cards(frame)
+        if cards:
+            detected_objects['cards'] = cards
+
+        return detected_objects
+
+    def draw_detection_overlay(self, frame, detected_objects):
+        """Draw detection overlays for coins, rulers, and cards"""
+        overlay = frame.copy()
+
+        # Draw coins
+        if 'coins' in detected_objects:
+            for coin in detected_objects['coins']:
+                center = coin['center']
+                radius = coin['radius']
+
+                # Draw circle
+                cv2.circle(overlay, center, radius, (255, 0, 255), 2)  # Magenta
+                cv2.circle(overlay, center, 3, (255, 0, 255), -1)     # Center dot
+
+                # Label
+                cv2.putText(overlay, f"Coin: {radius*2}px ({coin['confidence']:.2f})",
+                           (center[0]-40, center[1]-radius-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+
+        # Draw rulers
+        if 'rulers' in detected_objects:
+            for i, ruler in enumerate(detected_objects['rulers']):
+                x, y, w, h = ruler['bounding_rect']
+                center = ruler['center']
+
+                # Use different colors for different detection methods
+                method = ruler.get('detection_method', 'unknown')
+                if method == 'edges':
+                    color = (0, 255, 255)  # Cyan
+                elif method == 'contours':
+                    color = (0, 255, 0)    # Green
+                else:
+                    color = (128, 128, 128) # Gray
+
+                # Draw rectangle
+                cv2.rectangle(overlay, (x, y), (x+w, y+h), color, 2)
+                cv2.circle(overlay, center, 3, color, -1)  # Center dot
+
+                # Label with confidence
+                label = f"Ruler: {ruler['length_pixels']}px ({ruler['confidence']:.2f})"
+                cv2.putText(overlay, label,
+                           (x, y-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Draw cards
+        if 'cards' in detected_objects:
+            for card in detected_objects['cards']:
+                x, y, w, h = card['bounding_rect']
+                center = card['center']
+
+                # Draw rectangle in orange for cards
+                color = (0, 165, 255)  # Orange
+                cv2.rectangle(overlay, (x, y), (x+w, y+h), color, 2)
+                cv2.circle(overlay, center, 3, color, -1)  # Center dot
+
+                # Label
+                label = f"Card: {card['width_pixels']}px ({card['confidence']:.2f})"
+                cv2.putText(overlay, label,
+                           (x, y-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        return overlay
 
 class CameraInterfaceWrapper:
     """Wrapper to make your USBCameraInterface work with the GUI"""
@@ -73,13 +501,10 @@ class CameraInterfaceWrapper:
         try:
             log_with_timestamp("Creating USBCameraInterface...")
             # Use your USBCameraInterface with camera ID 1 (Logitech B525)
-            self.usb_camera = USBCameraInterface(camera_id=1, target_resolution=(640, 480))
+            self.usb_camera = USBCameraInterface(camera_id=CAMERA_ID, target_resolution=(CAMERA_WIDTH, CAMERA_HEIGHT))
             log_with_timestamp("Starting USB camera...")
 
             # Start camera with timeout handling
-            import threading
-            import time
-
             start_result = {'success': False, 'error': None}
 
             def start_camera_thread():
@@ -135,7 +560,7 @@ class DirectOpenCVCamera:
     """Direct OpenCV camera - simplest possible implementation"""
     def __init__(self, cap):
         self.cap = cap
-        print("Direct OpenCV camera initialized")
+        log_with_timestamp("Direct OpenCV camera initialized")
 
     def get_frame(self):
         ret, frame = self.cap.read()
@@ -144,14 +569,14 @@ class DirectOpenCVCamera:
     def release(self):
         if self.cap:
             self.cap.release()
-            print("Direct OpenCV camera released")
+            log_with_timestamp("Direct OpenCV camera released")
 
 class SimpleCameraInterface:
     """Simple camera interface that works with your existing setup"""
     def __init__(self):
         try:
-            # Try your camera ID 1 first
-            self.cap = cv2.VideoCapture(1)
+            # Try your camera ID first
+            self.cap = cv2.VideoCapture(CAMERA_ID)
             if not self.cap.isOpened():
                 # Fallback to camera 0
                 self.cap = cv2.VideoCapture(0)
@@ -160,12 +585,12 @@ class SimpleCameraInterface:
                 raise Exception("Cannot open any camera")
 
             # Set your working resolution
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            print("Simple camera initialized successfully")
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+            log_with_timestamp("Simple camera initialized successfully")
 
         except Exception as e:
-            print(f"Simple camera initialization failed: {e}")
+            log_with_timestamp(f"Simple camera initialization failed: {e}")
             raise
 
     def get_frame(self):
@@ -175,8 +600,6 @@ class SimpleCameraInterface:
     def release(self):
         if hasattr(self, 'cap') and self.cap:
             self.cap.release()
-
-# Remove the old function-based camera class since it's not needed
 
 
 class MeasurementGUI:
@@ -190,6 +613,7 @@ class MeasurementGUI:
         self.camera = None
         self.image_processor = ImageProcessor()
         self.measurement_calc = MeasurementCalculator()
+        self.object_detector = ObjectDetector()
 
         # GUI state variables
         self.is_measuring = False
@@ -203,6 +627,7 @@ class MeasurementGUI:
         self.measurement_points = []  # Store clicked points
         self.pixels_per_mm = 1.0  # Calibration factor
         self.measurement_overlay = None  # For drawing measurements
+        self.mouse_coords = (0, 0)  # Current mouse position
 
         # Threading control
         self.camera_thread = None
@@ -218,8 +643,8 @@ class MeasurementGUI:
     def setup_window(self):
         """Configure main window properties"""
         self.root.title("PYNQ Z7 Precision Object Measurement System")
-        self.root.geometry("1200x800")
-        self.root.minsize(1000, 700)
+        self.root.geometry("1400x900")  # Larger window to accommodate all controls
+        self.root.minsize(1200, 800)    # Minimum size to ensure visibility
 
         # Configure style
         style = ttk.Style()
@@ -244,8 +669,27 @@ class MeasurementGUI:
         self.video_label.bind("<Button-3>", self.on_video_right_click)  # Right-click
         self.video_label.bind("<Motion>", self.on_video_motion)
 
-        # Control panel frame
-        self.control_frame = ttk.LabelFrame(self.main_frame, text="Controls", padding="5")
+        # Mouse coordinate display
+        self.mouse_coords_label = ttk.Label(self.video_frame, text="Mouse: (0, 0)",
+                                          font=("Consolas", 9), background="black", foreground="lime")
+
+        # Control panel frame with scrollable content
+        self.control_outer_frame = ttk.LabelFrame(self.main_frame, text="Controls", padding="5")
+
+        # Create a canvas and scrollbar for the control panel
+        self.control_canvas = tk.Canvas(self.control_outer_frame, highlightthickness=0)
+        self.control_scrollbar = ttk.Scrollbar(self.control_outer_frame, orient="vertical", command=self.control_canvas.yview)
+        self.control_frame = ttk.Frame(self.control_canvas)
+
+        # Configure scrolling
+        self.control_canvas.configure(yscrollcommand=self.control_scrollbar.set)
+        self.control_frame.bind("<Configure>", lambda e: self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all")))
+        self.control_canvas.create_window((0, 0), window=self.control_frame, anchor="nw")
+
+        # Bind mousewheel to canvas
+        def _on_mousewheel(event):
+            self.control_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.control_canvas.bind("<MouseWheel>", _on_mousewheel)
 
         # Camera controls
         self.camera_controls_frame = ttk.Frame(self.control_frame)
@@ -256,8 +700,8 @@ class MeasurementGUI:
         self.capture_button = ttk.Button(self.camera_controls_frame, text="Capture Image",
                                        command=self.capture_image, state="disabled")
 
-        # Processing controls
-        self.processing_frame = ttk.LabelFrame(self.control_frame, text="Image Processing", padding="5")
+        # Processing controls - now with advanced options
+        self.processing_frame = ttk.LabelFrame(self.control_frame, text="Advanced Image Processing", padding="5")
 
         self.edge_detection_var = tk.BooleanVar(value=True)
         self.edge_detection_cb = ttk.Checkbutton(self.processing_frame,
@@ -271,6 +715,29 @@ class MeasurementGUI:
                                              variable=self.noise_filter_var,
                                              command=self.update_processing)
 
+        # Advanced processing method selection - only create if not already exists
+        self.advanced_frame = ttk.Frame(self.processing_frame)
+
+        # Edge detection method
+        ttk.Label(self.advanced_frame, text="Edge Method:").grid(row=0, column=0, sticky="w")
+        self.edge_method_var = tk.StringVar(value="canny_adaptive")
+        self.edge_method_combo = ttk.Combobox(self.advanced_frame,
+                                            textvariable=self.edge_method_var,
+                                            values=["canny_adaptive", "canny_standard", "sobel", "scharr"],
+                                            state="readonly", width=12)
+        self.edge_method_combo.grid(row=0, column=1, padx=(5,0))
+        self.edge_method_combo.bind("<<ComboboxSelected>>", lambda e: self.update_processing())
+
+        # Noise filter method
+        ttk.Label(self.advanced_frame, text="Noise Filter:").grid(row=1, column=0, sticky="w")
+        self.noise_method_var = tk.StringVar(value="bilateral")
+        self.noise_method_combo = ttk.Combobox(self.advanced_frame,
+                                             textvariable=self.noise_method_var,
+                                             values=["bilateral", "gaussian", "median"],
+                                             state="readonly", width=12)
+        self.noise_method_combo.grid(row=1, column=1, padx=(5,0))
+        self.noise_method_combo.bind("<<ComboboxSelected>>", lambda e: self.update_processing())
+
         # Edge detection threshold controls
         self.threshold_frame = ttk.Frame(self.processing_frame)
         ttk.Label(self.threshold_frame, text="Edge Threshold Low:").grid(row=0, column=0, sticky="w")
@@ -280,7 +747,8 @@ class MeasurementGUI:
                                            orient="horizontal", length=150,
                                            command=self.update_thresholds)
         self.threshold_low_label = ttk.Label(self.threshold_frame,
-                                           text=str(self.threshold_low_var.get()))
+                                           text=str(self.threshold_low_var.get()),
+                                           width=3, relief="sunken")
 
         ttk.Label(self.threshold_frame, text="Edge Threshold High:").grid(row=1, column=0, sticky="w")
         self.threshold_high_var = tk.IntVar(value=EDGE_DETECTION_HIGH)
@@ -289,7 +757,8 @@ class MeasurementGUI:
                                             orient="horizontal", length=150,
                                             command=self.update_thresholds)
         self.threshold_high_label = ttk.Label(self.threshold_frame,
-                                            text=str(self.threshold_high_var.get()))
+                                            text=str(self.threshold_high_var.get()),
+                                            width=3, relief="sunken")
 
         # Measurement controls
         self.measurement_frame = ttk.LabelFrame(self.control_frame, text="Measurements", padding="5")
@@ -309,10 +778,57 @@ class MeasurementGUI:
 
         # Calibration controls
         self.calibration_frame = ttk.LabelFrame(self.control_frame, text="Calibration", padding="5")
-        self.calibrate_button = ttk.Button(self.calibration_frame, text="Calibrate with Coin",
-                                         command=self.start_calibration)
+
+        # Calibration method selection
+        self.calibration_method_frame = ttk.Frame(self.calibration_frame)
+        ttk.Label(self.calibration_method_frame, text="Reference Object:").pack(anchor="w")
+
+        self.calibration_method_var = tk.StringVar(value="5 Shekel")
+
+        # Create scrollable frame for reference objects if there are many
+        self.objects_frame = ttk.Frame(self.calibration_method_frame)
+
+        # Debug: Log what objects we're creating radio buttons for
+        log_with_timestamp(f"Creating radio buttons for: {list(REFERENCE_OBJECTS.keys())}")
+
+        for obj_name in REFERENCE_OBJECTS.keys():
+            size_mm = REFERENCE_OBJECTS[obj_name]
+            if "Ruler" in obj_name:
+                display_text = f"{obj_name} ({size_mm}mm length)"
+            elif "Card" in obj_name:
+                display_text = f"{obj_name} ({size_mm}mm width)"
+            else:
+                display_text = f"{obj_name} ({size_mm}mm diameter)"
+
+            radio_btn = ttk.Radiobutton(self.objects_frame,
+                          text=display_text,
+                          variable=self.calibration_method_var,
+                          value=obj_name)
+            radio_btn.pack(anchor="w")
+            log_with_timestamp(f"Created radio button: {display_text}")
+
+        # Calibration action buttons
+        self.calibration_buttons_frame = ttk.Frame(self.calibration_frame)
+        self.auto_calibrate_button = ttk.Button(self.calibration_buttons_frame, text="Auto Detect & Calibrate",
+                                              command=self.auto_calibrate)
+        self.manual_calibrate_button = ttk.Button(self.calibration_buttons_frame, text="Manual Calibration",
+                                                command=self.manual_calibrate)
+
+        # Calibration status and results
         self.calibration_status = ttk.Label(self.calibration_frame, text="Status: Not Calibrated",
                                           foreground="red")
+        self.calibration_value_label = ttk.Label(self.calibration_frame, text="Scale: 1.0 px/mm",
+                                                foreground="blue")
+
+        # Object detection toggle
+        self.detection_frame = ttk.LabelFrame(self.control_frame, text="Object Detection", padding="5")
+        self.object_detection_var = tk.BooleanVar(value=False)
+        self.object_detection_cb = ttk.Checkbutton(self.detection_frame,
+                                                 text="Show Object Detection",
+                                                 variable=self.object_detection_var,
+                                                 command=self.toggle_object_detection)
+        self.detection_status = ttk.Label(self.detection_frame, text="Detection: Off",
+                                        foreground="gray")
 
         # Results panel
         self.results_frame = ttk.LabelFrame(self.main_frame, text="Measurement Results", padding="5")
@@ -346,49 +862,99 @@ class MeasurementGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        # Configure main frame grid
-        self.main_frame.columnconfigure(0, weight=2)  # Video gets more space
-        self.main_frame.columnconfigure(1, weight=1)  # Controls
-        self.main_frame.columnconfigure(2, weight=1)  # Results
+        # Configure main frame grid with better proportions
+        self.main_frame.columnconfigure(0, weight=3)  # Video gets more space
+        self.main_frame.columnconfigure(1, weight=2)  # Controls get adequate space
+        self.main_frame.columnconfigure(2, weight=2)  # Results get adequate space
         self.main_frame.rowconfigure(0, weight=1)
 
         # Video frame
         self.video_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         self.video_label.pack(expand=True, fill="both")
 
-        # Control frame
-        self.control_frame.grid(row=0, column=1, sticky="nsew", padx=5)
+        # Mouse coordinates overlay (top-right corner)
+        self.mouse_coords_label.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
 
-        # Camera controls
-        self.camera_controls_frame.pack(fill="x", pady=(0, 10))
-        self.start_button.pack(side="left", padx=(0, 5))
-        self.stop_button.pack(side="left", padx=(0, 5))
+        # Control frame with scrollbar
+        self.control_outer_frame.grid(row=0, column=1, sticky="nsew", padx=5)
+        self.control_canvas.pack(side="left", fill="both", expand=True)
+        self.control_scrollbar.pack(side="right", fill="y")
+
+        # Set a fixed width for the control canvas to prevent layout issues
+        self.control_canvas.configure(width=300)
+
+        # Camera controls - more compact
+        self.camera_controls_frame.pack(fill="x", pady=(0, 5))
+        self.start_button.pack(side="left", padx=(0, 2))
+        self.stop_button.pack(side="left", padx=(0, 2))
         self.capture_button.pack(side="left")
 
-        # Processing controls
-        self.processing_frame.pack(fill="x", pady=(0, 10))
+        # Processing controls - more compact with advanced options
+        self.processing_frame.pack(fill="x", pady=(0, 5))
         self.edge_detection_cb.pack(anchor="w")
         self.noise_filter_cb.pack(anchor="w")
 
-        # Threshold controls
-        self.threshold_frame.pack(fill="x", pady=(5, 0))
+        # Advanced method selection
+        self.advanced_frame.pack(fill="x", pady=(2, 0))
+
+        # Threshold controls - more compact
+        self.threshold_frame.pack(fill="x", pady=(2, 0))
         self.threshold_low_scale.grid(row=0, column=1, padx=(5, 0))
         self.threshold_low_label.grid(row=0, column=2, padx=(5, 0))
         self.threshold_high_scale.grid(row=1, column=1, padx=(5, 0))
         self.threshold_high_label.grid(row=1, column=2, padx=(5, 0))
 
-        # Measurement controls
-        self.measurement_frame.pack(fill="x", pady=(0, 10))
-        self.measure_distance_button.pack(fill="x", pady=2)
-        self.measure_diameter_button.pack(fill="x", pady=2)
-        self.measure_area_button.pack(fill="x", pady=2)
-        self.cancel_measurement_button.pack(fill="x", pady=2)
-        self.measurement_status.pack(pady=2)
+        # Measurement controls - more compact
+        self.measurement_frame.pack(fill="x", pady=(0, 5))
+        self.measure_distance_button.pack(fill="x", pady=1)
+        self.measure_diameter_button.pack(fill="x", pady=1)
+        self.measure_area_button.pack(fill="x", pady=1)
+        self.cancel_measurement_button.pack(fill="x", pady=1)
+        self.measurement_status.pack(pady=1)
 
-        # Calibration controls
-        self.calibration_frame.pack(fill="x", pady=(0, 10))
-        self.calibrate_button.pack(fill="x", pady=2)
-        self.calibration_status.pack(pady=2)
+        # Calibration controls - more compact
+        self.calibration_frame.pack(fill="x", pady=(0, 5))
+
+        self.calibration_method_frame.pack(fill="x", pady=(0, 2))
+        self.objects_frame.pack(fill="x", pady=(2, 0))
+
+        self.calibration_buttons_frame.pack(fill="x", pady=(2, 2))
+        self.auto_calibrate_button.pack(fill="x", pady=1)
+        self.manual_calibrate_button.pack(fill="x", pady=1)
+
+        self.calibration_status.pack(pady=1)
+        self.calibration_value_label.pack(pady=1)
+
+        # Object detection controls - more compact
+        self.detection_frame.pack(fill="x", pady=(0, 5))
+        self.object_detection_cb.pack(anchor="w")
+        self.detection_status.pack(pady=1)
+
+        # Measurement controls - more compact
+        self.measurement_frame.pack(fill="x", pady=(0, 5))
+        self.measure_distance_button.pack(fill="x", pady=1)
+        self.measure_diameter_button.pack(fill="x", pady=1)
+        self.measure_area_button.pack(fill="x", pady=1)
+        self.cancel_measurement_button.pack(fill="x", pady=1)
+        self.measurement_status.pack(pady=1)
+
+        # Calibration controls - more compact
+        self.calibration_frame.pack(fill="x", pady=(0, 5))
+
+        self.calibration_method_frame.pack(fill="x", pady=(0, 2))
+        self.objects_frame.pack(fill="x", pady=(2, 0))
+
+        self.calibration_buttons_frame.pack(fill="x", pady=(2, 2))
+        self.auto_calibrate_button.pack(fill="x", pady=1)
+        self.manual_calibrate_button.pack(fill="x", pady=1)
+
+        self.calibration_status.pack(pady=1)
+        self.calibration_value_label.pack(pady=1)
+
+        # Object detection controls - more compact
+        self.detection_frame.pack(fill="x", pady=(0, 5))
+        self.object_detection_cb.pack(anchor="w")
+        self.detection_status.pack(pady=1)
 
         # Results frame
         self.results_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
@@ -409,11 +975,11 @@ class MeasurementGUI:
         """Initialize camera in background to not block GUI"""
         def init_camera():
             try:
-                print("Background camera initialization started...")
+                log_with_timestamp("Background camera initialization started...")
                 self.initialize_camera()
-                print("Background camera initialization completed")
+                log_with_timestamp("Background camera initialization completed")
             except Exception as e:
-                print(f"Background camera initialization failed: {e}")
+                log_with_timestamp(f"Background camera initialization failed: {e}")
                 self.update_status(f"Camera initialization failed: {e}")
 
         # Run camera initialization in a separate thread
@@ -421,7 +987,7 @@ class MeasurementGUI:
         init_thread.start()
 
     def initialize_camera(self):
-        """Initialize camera system with your USBCameraInterface"""
+        """Initialize camera system with multiple fallback options"""
         self.update_status("Initializing camera...")
 
         # Try multiple camera options in order of preference
@@ -433,37 +999,37 @@ class MeasurementGUI:
 
         for name, init_func in camera_options:
             try:
-                print(f"Attempting {name}...")
+                log_with_timestamp(f"Attempting {name}...")
                 self.camera = init_func()
                 if self.camera:
                     self.update_status(f"{name} ready")
-                    print(f"{name} initialized successfully")
+                    log_with_timestamp(f"{name} initialized successfully")
                     return
             except Exception as e:
-                print(f"{name} failed: {e}")
+                log_with_timestamp(f"{name} failed: {e}")
                 continue
 
         # If we get here, no camera worked
         self.update_status("No camera available")
         self.camera = None
-        print("All camera initialization methods failed")
+        log_with_timestamp("All camera initialization methods failed")
 
     def try_direct_opencv(self):
         """Try direct OpenCV without any wrappers - fastest option"""
-        print("Testing direct OpenCV camera 1...")
-        cap = cv2.VideoCapture(1)
+        log_with_timestamp("Testing direct OpenCV camera...")
+        cap = cv2.VideoCapture(CAMERA_ID)
         if not cap.isOpened():
             cap.release()
-            raise Exception("Cannot open camera 1")
+            raise Exception(f"Cannot open camera {CAMERA_ID}")
 
         # Test frame capture
         ret, frame = cap.read()
         if not ret or frame is None:
             cap.release()
-            raise Exception("Cannot capture frames from camera 1")
+            raise Exception(f"Cannot capture frames from camera {CAMERA_ID}")
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
 
         return DirectOpenCVCamera(cap)
 
@@ -479,14 +1045,14 @@ class MeasurementGUI:
 
     def start_camera(self):
         """Start camera feed"""
-        print("Start camera button pressed")
+        log_with_timestamp("Start camera button pressed")
 
         if self.camera is None:
-            print("Camera is None, initializing...")
+            log_with_timestamp("Camera is None, initializing...")
             try:
                 self.initialize_camera()
             except Exception as e:
-                print(f"Camera initialization in start_camera failed: {e}")
+                log_with_timestamp(f"Camera initialization in start_camera failed: {e}")
                 messagebox.showerror("Camera Error", f"Camera initialization failed: {e}")
                 return
 
@@ -495,7 +1061,7 @@ class MeasurementGUI:
             return
 
         try:
-            print("Starting camera thread...")
+            log_with_timestamp("Starting camera thread...")
             self.stop_camera.clear()
             self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
             self.camera_thread.start()
@@ -505,11 +1071,11 @@ class MeasurementGUI:
             self.capture_button.config(state="normal")
 
             self.update_status("Camera started")
-            print("Camera thread started successfully")
+            log_with_timestamp("Camera thread started successfully")
 
         except Exception as e:
             self.update_status(f"Failed to start camera: {e}")
-            print(f"Camera start error: {e}")
+            log_with_timestamp(f"Camera start error: {e}")
             messagebox.showerror("Camera Error", f"Failed to start camera: {e}")
 
     def stop_camera_feed(self):
@@ -527,16 +1093,21 @@ class MeasurementGUI:
 
     def camera_loop(self):
         """Main camera processing loop"""
-        print("Camera loop started")
+        log_with_timestamp("Camera loop started")
         frame_count = 0
+        last_log_time = time.time()
 
         while not self.stop_camera.is_set():
             try:
                 frame = self.camera.get_frame()
                 if frame is not None:
                     frame_count += 1
-                    if frame_count % 30 == 0:  # Log every 30 frames
-                        print(f"Processing frame {frame_count}")
+                    current_time = time.time()
+
+                    # Log every 5 seconds instead of every 30 frames for less spam
+                    if current_time - last_log_time >= 5.0:
+                        log_with_timestamp(f"Camera running: {frame_count} frames processed, current frame shape: {frame.shape}")
+                        last_log_time = current_time
 
                     self.current_frame = frame.copy()
 
@@ -546,34 +1117,113 @@ class MeasurementGUI:
                     # Convert for display
                     self.update_video_display(display_frame)
                 else:
-                    print("Warning: get_frame() returned None")
+                    if frame_count == 0:  # Only log this initially
+                        log_with_timestamp("Warning: get_frame() returned None")
 
                 time.sleep(1/30)  # ~30 FPS
 
             except Exception as e:
-                print(f"Camera loop error: {e}")
+                log_with_timestamp(f"Camera loop error: {e}")
                 self.update_status(f"Camera error: {e}")
                 break
 
-        print("Camera loop ended")
+        log_with_timestamp("Camera loop ended")
 
     def process_frame(self, frame):
-        """Process frame based on current settings"""
+        """Process frame using advanced image processing methods"""
         processed = frame.copy()
 
-        if self.edge_detection_var.get():
-            processed = self.image_processor.detect_edges(
-                processed,
-                self.threshold_low_var.get(),
-                self.threshold_high_var.get()
-            )
+        try:
+            # Apply noise filtering FIRST if enabled (before edge detection)
+            if self.noise_filter_var.get():
+                noise_method = getattr(self, 'noise_method_var', None)
+                if noise_method and hasattr(noise_method, 'get'):
+                    method = noise_method.get()
+                else:
+                    method = 'bilateral'
 
-        if self.noise_filter_var.get():
-            processed = self.image_processor.apply_noise_filter(processed)
+                if hasattr(self.image_processor, 'apply_noise_filter'):
+                    try:
+                        processed = self.image_processor.apply_noise_filter(processed, method=method)
+                        log_with_timestamp(f"Applied {method} noise filtering")
+                    except TypeError:
+                        processed = cv2.bilateralFilter(processed, 9, 75, 75)
+                else:
+                    # Basic noise filtering options
+                    if method == 'bilateral':
+                        processed = cv2.bilateralFilter(processed, 9, 75, 75)
+                    elif method == 'gaussian':
+                        processed = cv2.GaussianBlur(processed, (5, 5), 0)
+                    elif method == 'median':
+                        processed = cv2.medianBlur(processed, 5)
 
-        # Add measurement overlay if in measurement mode
-        if self.measurement_mode and len(self.measurement_points) > 0:
-            processed = self.draw_measurement_overlay(processed)
+            # Apply edge detection SECOND if enabled
+            if self.edge_detection_var.get():
+                edge_method = getattr(self, 'edge_method_var', None)
+                if edge_method and hasattr(edge_method, 'get'):
+                    method = edge_method.get()
+                else:
+                    method = 'canny_adaptive'
+
+                # Convert to grayscale first
+                if len(processed.shape) == 3:
+                    gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = processed.copy()
+
+                # Apply different edge detection methods
+                if method == 'canny_adaptive':
+                    # Adaptive Canny with auto thresholds
+                    high_thresh, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    low_thresh = 0.5 * high_thresh
+                    blurred = cv2.GaussianBlur(gray, (5, 5), 1.0)
+                    processed = cv2.Canny(blurred, int(low_thresh), int(high_thresh))
+
+                elif method == 'canny_standard':
+                    # Standard Canny with manual thresholds
+                    processed = cv2.Canny(gray, self.threshold_low_var.get(), self.threshold_high_var.get())
+
+                elif method == 'sobel':
+                    # Sobel edge detection
+                    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+                    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+                    sobel_combined = np.sqrt(sobel_x**2 + sobel_y**2)
+                    processed = np.uint8(sobel_combined / sobel_combined.max() * 255)
+                    _, processed = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                elif method == 'scharr':
+                    # Scharr edge detection (more accurate than Sobel)
+                    scharr_x = cv2.Scharr(gray, cv2.CV_64F, 1, 0)
+                    scharr_y = cv2.Scharr(gray, cv2.CV_64F, 0, 1)
+                    scharr_combined = np.sqrt(scharr_x**2 + scharr_y**2)
+                    processed = np.uint8(scharr_combined / scharr_combined.max() * 255)
+                    _, processed = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                log_with_timestamp(f"Applied {method} edge detection")
+
+        except Exception as e:
+            log_with_timestamp(f"Frame processing error: {e}")
+            processed = frame.copy()
+
+        # Add object detection overlay if enabled
+        if self.object_detection_var.get() and self.object_detector and self.current_frame is not None:
+            try:
+                detected_objects = self.object_detector.detect_objects(self.current_frame)
+                if detected_objects:
+                    if len(processed.shape) == 2:
+                        processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+                    processed = self.object_detector.draw_detection_overlay(processed, detected_objects)
+            except Exception as e:
+                log_with_timestamp(f"Object detection overlay error: {e}")
+
+        # Add measurement overlay if points exist
+        if len(self.measurement_points) > 0:
+            try:
+                if len(processed.shape) == 2:
+                    processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+                processed = self.draw_measurement_overlay(processed)
+            except Exception as e:
+                log_with_timestamp(f"Measurement overlay error: {e}")
 
         self.processed_frame = processed
         return processed
@@ -605,13 +1255,62 @@ class MeasurementGUI:
             self.update_status(f"Display update error: {e}")
 
     def update_processing(self):
-        """Update processing settings"""
-        self.update_status("Processing settings updated")
+        """Update processing settings with advanced methods"""
+        edge_enabled = self.edge_detection_var.get()
+        noise_enabled = self.noise_filter_var.get()
+
+        # Safely get method values with fallbacks
+        edge_method = getattr(self, 'edge_method_var', None)
+        if edge_method and hasattr(edge_method, 'get'):
+            edge_method_name = edge_method.get()
+        else:
+            edge_method_name = "canny_adaptive"
+
+        noise_method = getattr(self, 'noise_method_var', None)
+        if noise_method and hasattr(noise_method, 'get'):
+            noise_method_name = noise_method.get()
+        else:
+            noise_method_name = "bilateral"
+
+        log_with_timestamp(f"Processing update: Edge={edge_enabled}({edge_method_name}), Noise={noise_enabled}({noise_method_name})")
+        self.update_status(f"Processing: Edge={edge_method_name}, Noise={noise_method_name}")
 
     def update_thresholds(self, value=None):
-        """Update threshold display labels"""
-        self.threshold_low_label.config(text=str(self.threshold_low_var.get()))
-        self.threshold_high_label.config(text=str(self.threshold_high_var.get()))
+        """Update threshold display labels and apply changes in real-time"""
+        low_val = self.threshold_low_var.get()
+        high_val = self.threshold_high_var.get()
+
+        # Update label displays
+        self.threshold_low_label.config(text=str(low_val))
+        self.threshold_high_label.config(text=str(high_val))
+
+        # Ensure high threshold is always greater than low threshold
+        if high_val <= low_val:
+            # Automatically adjust the other slider to maintain proper relationship
+            if value is not None:  # Only auto-adjust if user is actively dragging
+                try:
+                    # Determine which slider was moved based on the value
+                    current_val = int(float(value))
+                    if abs(current_val - low_val) < abs(current_val - high_val):
+                        # Low slider was moved, adjust high slider
+                        new_high = max(low_val + 10, high_val)
+                        if new_high <= 200:
+                            self.threshold_high_var.set(new_high)
+                            self.threshold_high_label.config(text=str(new_high))
+                    else:
+                        # High slider was moved, adjust low slider
+                        new_low = min(high_val - 10, low_val)
+                        if new_low >= 10:
+                            self.threshold_low_var.set(new_low)
+                            self.threshold_low_label.config(text=str(new_low))
+                except:
+                    pass  # If conversion fails, just update labels
+
+        # Update status with current values
+        self.update_status(f"Edge thresholds: Low={low_val}, High={high_val}")
+
+        # Log the change with timestamp for debugging
+        log_with_timestamp(f"Threshold update: Low={low_val}, High={high_val}")
 
     def capture_image(self):
         """Capture current frame"""
@@ -663,8 +1362,15 @@ class MeasurementGUI:
 
     def start_measurement_mode(self, mode):
         """Initialize measurement mode"""
-        self.measurement_mode = mode
+        log_with_timestamp(f"Starting {mode} measurement mode")
+
+        # Clear any previous measurement points
         self.measurement_points = []
+
+        self.measurement_mode = mode
+
+        # Store measurement type for later reference
+        self.last_measurement_type = mode
 
         # Update button states
         self.measure_distance_button.config(state="disabled")
@@ -672,22 +1378,50 @@ class MeasurementGUI:
         self.measure_area_button.config(state="disabled")
         self.cancel_measurement_button.config(state="normal")
 
+        # Change video frame title to show active mode
+        self.video_frame.config(text=f"Live Camera Feed - {mode.upper()} MODE")
+
         self.update_status(f"{mode.capitalize()} measurement mode active")
 
-    def cancel_measurement(self):
-        """Cancel current measurement"""
-        self.measurement_mode = None
-        self.measurement_points = []
+    def reset_measurement_buttons(self):
+        """Reset measurement buttons to normal state"""
+        self.measure_distance_button.config(state="normal")
+        self.measure_diameter_button.config(state="normal")
+        self.measure_area_button.config(state="normal")
+        self.cancel_measurement_button.config(state="normal")  # Keep cancel available
 
-        # Reset button states
+    def cancel_measurement(self):
+        """Cancel current measurement and clear all points"""
+        log_with_timestamp(f"Cancelling measurement - clearing {len(self.measurement_points)} points")
+
+        # Reset all measurement/calibration states
+        self.measurement_mode = None
+        self.measurement_points = []  # Clear all points
+        self.calibration_active = False
+
+        # Reset ALL button states - including calibration buttons
         self.measure_distance_button.config(state="normal")
         self.measure_diameter_button.config(state="normal")
         self.measure_area_button.config(state="normal")
         self.cancel_measurement_button.config(state="disabled")
 
+        # Re-enable calibration buttons
+        self.auto_calibrate_button.config(state="normal")
+        self.manual_calibrate_button.config(state="normal")
+
+        # Reset video frame title
+        self.video_frame.config(text="Live Camera Feed")
+
+        # Reset status messages
         self.measurement_status.config(text="Ready for measurement", foreground="green")
-        self.update_status("Measurement cancelled")
-        self.add_result("Measurement cancelled")
+        if hasattr(self, 'calibration_status') and self.calibration_active:
+            # Only reset calibration status if we were in calibration mode
+            self.calibration_status.config(text="Status: Calibration Cancelled", foreground="orange")
+
+        self.update_status("Measurement/Calibration cancelled - points cleared")
+        self.add_result("Measurement/Calibration cancelled - all points cleared")
+
+        log_with_timestamp("All measurement and calibration states reset")
 
     def on_video_click(self, event):
         """Handle mouse clicks on video display"""
@@ -707,12 +1441,16 @@ class MeasurementGUI:
         self.measurement_points.append(point)
         log_with_timestamp(f"Added measurement point: {point} (total points: {len(self.measurement_points)})")
 
+        # Handle different measurement modes
         if self.measurement_mode == 'distance' and len(self.measurement_points) == 2:
             log_with_timestamp("Distance measurement ready - calculating...")
             self.calculate_distance()
         elif self.measurement_mode == 'diameter' and len(self.measurement_points) == 2:
             log_with_timestamp("Diameter measurement ready - calculating...")
             self.calculate_diameter()
+        elif self.measurement_mode in ['calibration_coin', 'calibration_ruler'] and len(self.measurement_points) == 2:
+            log_with_timestamp("Calibration measurement ready - calculating...")
+            self.complete_manual_calibration()
         elif self.measurement_mode == 'area':
             log_with_timestamp(f"Area measurement: {len(self.measurement_points)} points selected")
             # Area measurement continues until right-click
@@ -726,12 +1464,19 @@ class MeasurementGUI:
 
     def on_video_motion(self, event):
         """Handle mouse motion over video display"""
+        # Update mouse coordinates display
+        img_x, img_y = self.convert_display_to_image_coords(event.x, event.y)
+        if img_x is not None and img_y is not None:
+            self.mouse_coords = (img_x, img_y)
+            self.mouse_coords_label.config(text=f"Mouse: ({img_x}, {img_y})")
+
+        # Live preview for measurement mode
         if self.measurement_mode and len(self.measurement_points) > 0:
-            # Could add live preview line here
+            # Could add live preview line here in the future
             pass
 
     def convert_display_to_image_coords(self, display_x, display_y):
-        """Convert display coordinates to image coordinates"""
+        """Convert display coordinates to image coordinates with proper scaling"""
         if self.current_frame is None:
             log_with_timestamp("No current frame available for coordinate conversion")
             return None, None
@@ -739,10 +1484,48 @@ class MeasurementGUI:
         try:
             # Get actual frame dimensions
             img_height, img_width = self.current_frame.shape[:2]
-            log_with_timestamp(f"Current frame dimensions: {img_width}x{img_height}")
 
             # Get the video label's actual displayed size
             label_width = self.video_label.winfo_width()
+            label_height = self.video_label.winfo_height()
+
+            # The image is resized to 640x480 in update_video_display, but may be centered in label
+            display_img_width = 640
+            display_img_height = 480
+
+            # Calculate centering offsets
+            x_offset = max(0, (label_width - display_img_width) // 2)
+            y_offset = max(0, (label_height - display_img_height) // 2)
+
+            # Adjust for centering
+            adjusted_x = display_x - x_offset
+            adjusted_y = display_y - y_offset
+
+            # Check bounds
+            if adjusted_x < 0 or adjusted_x >= display_img_width or adjusted_y < 0 or adjusted_y >= display_img_height:
+                log_with_timestamp(f"Click outside image area: ({adjusted_x}, {adjusted_y})")
+                return None, None
+
+            # Calculate scaling from display to actual image
+            scale_x = img_width / display_img_width
+            scale_y = img_height / display_img_height
+
+            # Convert to image coordinates
+            img_x = int(adjusted_x * scale_x)
+            img_y = int(adjusted_y * scale_y)
+
+            # Clamp to actual image bounds
+            img_x = max(0, min(img_x, img_width - 1))
+            img_y = max(0, min(img_y, img_height - 1))
+
+            log_with_timestamp(f"Coord conversion: display({display_x},{display_y}) -> adjusted({adjusted_x},{adjusted_y}) -> image({img_x},{img_y})")
+            log_with_timestamp(f"Scales: x={scale_x:.3f}, y={scale_y:.3f}, offset=({x_offset},{y_offset})")
+
+            return img_x, img_y
+
+        except Exception as e:
+            log_with_timestamp(f"Coordinate conversion error: {e}")
+            return None, Nonewidth()
             label_height = self.video_label.winfo_height()
             log_with_timestamp(f"Video label display size: {label_width}x{label_height}")
 
@@ -776,21 +1559,45 @@ class MeasurementGUI:
         overlay = frame.copy()
 
         try:
-            # Draw points
+            # Draw points with smaller, more visible design
             for i, point in enumerate(self.measurement_points):
-                cv2.circle(overlay, point, 8, (0, 255, 0), -1)  # Larger green dots
-                cv2.circle(overlay, point, 10, (255, 255, 255), 2)  # White border
-                cv2.putText(overlay, str(i+1), (point[0]+15, point[1]-15),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # Small filled circle (3px radius)
+                cv2.circle(overlay, point, 3, (0, 255, 0), -1)  # Green center
+                # Thin white border (5px radius)
+                cv2.circle(overlay, point, 5, (255, 255, 255), 1)  # White border
+                # Point number with better visibility
+                cv2.putText(overlay, str(i+1), (point[0]+8, point[1]-8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)  # White text with thick border
+                cv2.putText(overlay, str(i+1), (point[0]+8, point[1]-8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)  # Green text
 
-            # Draw lines for distance/diameter
-            if self.measurement_mode in ['distance', 'diameter'] and len(self.measurement_points) >= 2:
-                cv2.line(overlay, self.measurement_points[0], self.measurement_points[1], (0, 0, 255), 3)
+            # Draw lines for distance/diameter (always show if 2+ points exist)
+            if len(self.measurement_points) >= 2:
+                if hasattr(self, 'last_measurement_type'):
+                    # Use stored measurement type for completed measurements
+                    if self.last_measurement_type in ['distance', 'diameter', 'calibration_coin', 'calibration_ruler']:
+                        cv2.line(overlay, self.measurement_points[0], self.measurement_points[1], (0, 0, 255), 2)
+                    elif self.last_measurement_type == 'area' and len(self.measurement_points) > 2:
+                        points = np.array(self.measurement_points, np.int32)
+                        cv2.polylines(overlay, [points], True, (0, 0, 255), 2)
+                else:
+                    # For active measurements, use current measurement mode
+                    if self.measurement_mode in ['distance', 'diameter', 'calibration_coin', 'calibration_ruler']:
+                        cv2.line(overlay, self.measurement_points[0], self.measurement_points[1], (0, 0, 255), 2)
+                    elif self.measurement_mode == 'area' and len(self.measurement_points) > 2:
+                        points = np.array(self.measurement_points, np.int32)
+                        cv2.polylines(overlay, [points], True, (0, 0, 255), 2)
 
-            # Draw polygon for area
-            elif self.measurement_mode == 'area' and len(self.measurement_points) > 2:
-                points = np.array(self.measurement_points, np.int32)
-                cv2.polylines(overlay, [points], True, (0, 0, 255), 3)
+            # Draw live preview line from last point to mouse (only if actively measuring)
+            if self.measurement_mode and len(self.measurement_points) > 0 and hasattr(self, 'mouse_coords'):
+                last_point = self.measurement_points[-1]
+                mouse_point = self.mouse_coords
+                if self.measurement_mode in ['distance', 'diameter', 'calibration_coin', 'calibration_ruler'] and len(self.measurement_points) == 1:
+                    # Show preview line for distance/diameter/calibration
+                    cv2.line(overlay, last_point, mouse_point, (128, 128, 128), 1)  # Gray preview line
+                elif self.measurement_mode == 'area' and len(self.measurement_points) >= 1:
+                    # Show preview line for area
+                    cv2.line(overlay, last_point, mouse_point, (128, 128, 128), 1)  # Gray preview line
 
         except Exception as e:
             log_with_timestamp(f"Error drawing overlay: {e}")
@@ -811,9 +1618,14 @@ class MeasurementGUI:
         real_distance = pixel_distance / self.pixels_per_mm
 
         result = f"Distance: {real_distance:.2f} mm ({pixel_distance:.1f} pixels)"
+        log_with_timestamp(f"Distance calculated: {result}")
         self.add_result(result)
 
-        self.cancel_measurement()
+        # Don't cancel measurement - keep points and line visible
+        self.measurement_mode = None  # Disable new point selection
+        self.reset_measurement_buttons()  # Re-enable measurement buttons
+        self.measurement_status.config(text="Distance measured - points visible", foreground="green")
+        self.video_frame.config(text="Live Camera Feed - Distance Result Shown")
 
     def calculate_diameter(self):
         """Calculate diameter from two edge points"""
@@ -829,9 +1641,14 @@ class MeasurementGUI:
         real_diameter = pixel_diameter / self.pixels_per_mm
 
         result = f"Diameter: {real_diameter:.2f} mm ({pixel_diameter:.1f} pixels)"
+        log_with_timestamp(f"Diameter calculated: {result}")
         self.add_result(result)
 
-        self.cancel_measurement()
+        # Don't cancel measurement - keep points and line visible
+        self.measurement_mode = None  # Disable new point selection
+        self.reset_measurement_buttons()  # Re-enable measurement buttons
+        self.measurement_status.config(text="Diameter measured - points visible", foreground="green")
+        self.video_frame.config(text="Live Camera Feed - Diameter Result Shown")
 
     def calculate_area(self):
         """Calculate area from polygon points"""
@@ -849,22 +1666,196 @@ class MeasurementGUI:
         real_area = pixel_area / (self.pixels_per_mm ** 2)
 
         result = f"Area: {real_area:.2f} mm² ({pixel_area:.1f} pixels²)"
+        log_with_timestamp(f"Area calculated: {result}")
         self.add_result(result)
 
-        self.cancel_measurement()
+        # Don't cancel measurement - keep points and polygon visible
+        self.measurement_mode = None  # Disable new point selection
+        self.reset_measurement_buttons()  # Re-enable measurement buttons
+        self.measurement_status.config(text="Area measured - polygon visible", foreground="green")
+        self.video_frame.config(text="Live Camera Feed - Area Result Shown")
 
-    def start_calibration(self):
-        """Start calibration process"""
+    def auto_calibrate(self):
+        """Automatically detect and calibrate using selected object"""
         if self.current_frame is None:
-            messagebox.showwarning("Calibration Error", "No image available for calibration")
+            messagebox.showwarning("Calibration Error", "No camera image available")
             return
 
-        self.calibration_active = True
-        self.add_result("Calibration started - Place reference coin in view")
-        self.update_status("Calibration mode active")
+        calibration_object = self.calibration_method_var.get()
+        log_with_timestamp(f"Starting auto calibration with {calibration_object}")
 
-        # Placeholder for calibration logic
-        self.calibration_status.config(text="Status: Calibrating...", foreground="orange")
+        try:
+            # Detect all objects in current frame
+            detected_objects = self.object_detector.detect_objects(self.current_frame)
+
+            # Determine what type of object we're looking for
+            if "Shekel" in calibration_object:
+                # Looking for a coin
+                if 'coins' not in detected_objects or not detected_objects['coins']:
+                    messagebox.showwarning("Calibration Failed",
+                                         f"No coins detected in image.\n"
+                                         f"Please ensure a {calibration_object} coin is clearly visible.")
+                    return
+
+                # Use the best detected coin
+                best_coin = detected_objects['coins'][0]
+                pixel_diameter = best_coin['diameter_pixels']
+                real_diameter_mm = REFERENCE_OBJECTS[calibration_object]
+
+                # Calculate pixels per mm
+                self.pixels_per_mm = pixel_diameter / real_diameter_mm
+                confidence = best_coin['confidence']
+
+                measurement_type = "diameter"
+
+            elif "Ruler" in calibration_object:
+                # Looking for a ruler
+                if 'rulers' not in detected_objects or not detected_objects['rulers']:
+                    messagebox.showwarning("Calibration Failed",
+                                         f"No rulers detected in image.\n"
+                                         f"Please ensure a ruler is clearly visible and rectangular.")
+                    return
+
+                # Use the best detected ruler
+                best_ruler = detected_objects['rulers'][0]
+                pixel_length = best_ruler['length_pixels']
+                real_length_mm = REFERENCE_OBJECTS[calibration_object]
+
+                # Calculate pixels per mm
+                self.pixels_per_mm = pixel_length / real_length_mm
+                confidence = best_ruler['confidence']
+
+                measurement_type = "length"
+
+            elif "Card" in calibration_object:
+                # Credit card detection
+                if 'cards' not in detected_objects or not detected_objects['cards']:
+                    messagebox.showwarning("Calibration Failed",
+                                         f"No credit cards detected.\n"
+                                         f"Please ensure the credit card is clearly visible and well-lit.")
+                    return
+
+                # Use the best detected card
+                best_card = detected_objects['cards'][0]
+                pixel_width = best_card['width_pixels']  # Use shorter dimension for credit card width
+                real_width_mm = REFERENCE_OBJECTS[calibration_object]
+
+                # Calculate pixels per mm
+                self.pixels_per_mm = pixel_width / real_width_mm
+                confidence = best_card['confidence']
+
+                measurement_type = "width"
+
+            else:
+                messagebox.showwarning("Calibration Error", f"Unknown calibration object: {calibration_object}")
+                return
+
+            # Update calibration status
+            self.calibration_status.config(text=f"Status: Calibrated ({confidence:.2f})",
+                                         foreground="green")
+            self.calibration_value_label.config(text=f"Scale: {self.pixels_per_mm:.3f} px/mm")
+
+            # Log and display results
+            result_text = (f"Auto calibration successful!\n"
+                         f"Object: {calibration_object}\n" 
+                         f"Measurement: {measurement_type}\n"
+                         f"Scale: {self.pixels_per_mm:.3f} pixels/mm\n"
+                         f"Confidence: {confidence:.2f}")
+
+            log_with_timestamp(f"Auto calibration: {self.pixels_per_mm:.3f} px/mm, confidence: {confidence:.2f}")
+            self.add_result(f"Auto calibration: {self.pixels_per_mm:.3f} px/mm ({calibration_object})")
+            self.update_status("Auto calibration completed")
+
+            messagebox.showinfo("Calibration Complete", result_text)
+
+        except Exception as e:
+            log_with_timestamp(f"Auto calibration error: {e}")
+            messagebox.showerror("Calibration Error", f"Auto calibration failed: {e}")
+
+    def manual_calibrate(self):
+        """Manual calibration by clicking on reference object"""
+        if self.current_frame is None:
+            messagebox.showwarning("Calibration Error", "No camera image available")
+            return
+
+        calibration_object = self.calibration_method_var.get()
+        self.start_manual_calibration(calibration_object)
+
+    def start_manual_calibration(self, calibration_object):
+        """Start manual calibration by clicking reference object points"""
+        self.calibration_active = True
+        self.measurement_mode = 'calibration_manual'
+        self.measurement_points = []
+        self.current_calibration_object = calibration_object
+
+        # Disable other buttons
+        self.auto_calibrate_button.config(state="disabled")
+        self.manual_calibrate_button.config(state="disabled")
+        self.cancel_measurement_button.config(state="normal")
+
+        size_mm = REFERENCE_OBJECTS[calibration_object]
+
+        self.calibration_status.config(text="Manual calibration: Click object edges", foreground="orange")
+        self.measurement_status.config(text=f"Click two points on {calibration_object} ({size_mm}mm)", foreground="blue")
+        self.video_frame.config(text="Live Camera Feed - MANUAL CALIBRATION")
+
+        self.add_result(f"Manual calibration: Click two points on {calibration_object}")
+        log_with_timestamp(f"Manual calibration started for {calibration_object}")
+
+    def complete_manual_calibration(self):
+        """Complete manual calibration with selected points"""
+        if len(self.measurement_points) < 2:
+            return
+
+        p1, p2 = self.measurement_points[0], self.measurement_points[1]
+        pixel_distance = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+
+        # Get real distance from selected object
+        calibration_object = getattr(self, 'current_calibration_object', self.calibration_method_var.get())
+        real_distance_mm = REFERENCE_OBJECTS[calibration_object]
+
+        # Calculate pixels per mm
+        self.pixels_per_mm = pixel_distance / real_distance_mm
+
+        # Update status
+        self.calibration_status.config(text=f"Status: Calibrated (Manual)", foreground="green")
+        self.calibration_value_label.config(text=f"Scale: {self.pixels_per_mm:.3f} px/mm")
+
+        # Log results
+        result_text = (f"Manual calibration successful!\n"
+                      f"Object: {calibration_object}\n"
+                      f"Pixel distance: {pixel_distance:.1f}px\n"
+                      f"Real distance: {real_distance_mm}mm\n"
+                      f"Scale: {self.pixels_per_mm:.3f} px/mm")
+
+        log_with_timestamp(f"Manual calibration: {self.pixels_per_mm:.3f} px/mm using {calibration_object}")
+        self.add_result(f"Manual calibration: {self.pixels_per_mm:.3f} px/mm ({calibration_object})")
+
+        messagebox.showinfo("Calibration Complete", result_text)
+
+        # Reset calibration mode
+        self.calibration_active = False
+        self.measurement_mode = None
+
+        # Re-enable buttons
+        self.auto_calibrate_button.config(state="normal")
+        self.manual_calibrate_button.config(state="normal")
+        self.cancel_measurement_button.config(state="disabled")
+
+        self.measurement_status.config(text="Ready for measurement", foreground="green")
+        self.video_frame.config(text="Live Camera Feed")
+        self.update_status("Manual calibration completed")
+
+    def toggle_object_detection(self):
+        """Toggle object detection overlay"""
+        if self.object_detection_var.get():
+            self.detection_status.config(text="Detection: On", foreground="green")
+            log_with_timestamp("Object detection enabled")
+        else:
+            self.detection_status.config(text="Detection: Off", foreground="gray")
+            log_with_timestamp("Object detection disabled")
+
+        self.update_status(f"Object detection: {'On' if self.object_detection_var.get() else 'Off'}")
 
     def add_result(self, result_text):
         """Add result to results display"""
@@ -929,7 +1920,7 @@ def main():
         app = MeasurementGUI()
         app.run()
     except Exception as e:
-        print(f"Failed to start application: {e}")
+        log_with_timestamp(f"Failed to start application: {e}")
         import traceback
         traceback.print_exc()
 
