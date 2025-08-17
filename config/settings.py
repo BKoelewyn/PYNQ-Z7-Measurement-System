@@ -4,7 +4,7 @@ Enhanced with calibration objects and object detection parameters
 """
 
 # Camera Configuration
-CAMERA_ID = 0  # Logitech B525 USB camera
+CAMERA_ID = 1  # Logitech B525 USB camera
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30

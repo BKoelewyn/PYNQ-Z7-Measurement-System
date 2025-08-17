@@ -1578,27 +1578,27 @@ def main():
         print("="*60)
 
         if ADVANCED_MEASUREMENTS_AVAILABLE:
-            print("✅ Advanced Measurement Algorithms: ACTIVE")
-            print("✅ Statistical Analysis: AVAILABLE")
-            print("✅ Uncertainty Quantification: ENABLED")
-            print("✅ Quality Assessment: FUNCTIONAL")
-            print("✅ Sub-millimeter Precision: ±0.1-0.5mm")
+            print("Advanced Measurement Algorithms: ACTIVE")
+            print("Statistical Analysis: AVAILABLE")
+            print("Uncertainty Quantification: ENABLED")
+            print("Quality Assessment: FUNCTIONAL")
+            print("Sub-millimeter Precision: ±0.1-0.5mm")
         else:
-            print("⚠️  Advanced Measurement Algorithms: NOT AVAILABLE")
-            print("⚠️  Basic measurements only - precision limited")
-            print("💡 To enable advanced features:")
-            print("   Add measurement_algorithms.py to software/python/")
+            print("Advanced Measurement Algorithms: NOT AVAILABLE")
+            print("Basic measurements only - precision limited")
+            print("To enable advanced features:")
+            print("Add measurement_algorithms.py to software/python/")
 
         if CAMERA_AVAILABLE:
-            print("✅ Camera System: READY")
+            print("Camera System: READY")
         else:
-            print("⚠️  Camera System: LIMITED")
+            print("Camera System: LIMITED")
 
-        print("✅ Israeli Coin Calibration: CONFIGURED")
-        print("✅ Real-time Processing: ENABLED")
-        print("✅ FIXED: Noise Filter Dropdown: WORKING")
-        print("✅ FIXED: Object Detection: WORKING")
-        print("✅ FIXED: Statistics Button: AVAILABLE")
+        print("Israeli Coin Calibration: CONFIGURED")
+        print("Real-time Processing: ENABLED")
+        print("FIXED: Noise Filter Dropdown: WORKING")
+        print("FIXED: Object Detection: WORKING")
+        print("FIXED: Statistics Button: AVAILABLE")
         print("="*60)
         print()
 
